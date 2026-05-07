@@ -1,0 +1,9 @@
+{
+  "name": "Remix: Teddy Bear Face Tracker",
+  "description": "An interactive WebGL teddy bear that tracks your face using webcam and MediaPipe.",
+  "requestFramePermissions": [
+    "camera",
+    "serial"
+  ],
+  "majorCapabilities": []
+}
