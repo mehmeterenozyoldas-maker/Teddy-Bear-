@@ -8,6 +8,7 @@ import Scene from './components/Scene';
 import FaceTracker from './components/FaceTracker';
 import ArduinoConnection from './components/ArduinoConnection';
 import CalibrationDashboard from './components/CalibrationDashboard';
+import AudioManager from './components/AudioManager';
 import { useStore } from './store';
 import { Leva } from 'leva';
 
@@ -24,6 +25,7 @@ export default function App() {
       <FaceTracker />
       <ArduinoConnection />
       <CalibrationDashboard />
+      <AudioManager />
       <div className="fixed top-4 right-4 z-[1000] pointer-events-auto">
       </div>
     </div>

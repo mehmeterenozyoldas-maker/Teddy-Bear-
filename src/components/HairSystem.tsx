@@ -255,6 +255,7 @@ export default function HairSystem({ positionsTexture, normalsTexture, mousePosi
         varying vec2 vUv;
         varying vec3 vWorldPosition;
         varying vec3 vBaseNormal;
+        varying float vRandom;
         
         // Pseudo-random noise for length mapping and clumping
         float hash(vec2 p) { return fract(1e4 * sin(17.0 * p.x + p.y * 0.1) * (0.1 + abs(sin(p.y * 13.0 + p.x)))); }
@@ -267,6 +268,8 @@ export default function HairSystem({ positionsTexture, normalsTexture, mousePosi
           float v = floor(i / size) / size;
           vec2 texUv = vec2(u, v);
           
+          vRandom = hash(texUv * 100.0);
+
           vec3 wPos = texture2D(positionsTexture, texUv).xyz;
           vec3 normal = texture2D(normalsTexture, texUv).xyz;
           // Rotate the normal using the modelMatrix's rotation (normalMatrix)
@@ -357,6 +360,7 @@ export default function HairSystem({ positionsTexture, normalsTexture, mousePosi
         varying vec2 vUv;
         varying vec3 vWorldPosition;
         varying vec3 vBaseNormal;
+        varying float vRandom;
         uniform float uTime;
         uniform vec3 uRootColor;
         uniform vec3 uTipColor;
@@ -364,8 +368,12 @@ export default function HairSystem({ positionsTexture, normalsTexture, mousePosi
         void main() {
           float curve = vUv.y;
           
+          // Introduce slight color variation per strand
+          vec3 variedTip = mix(uTipColor, vec3(1.0), (vRandom - 0.5) * 0.1);
+          vec3 variedRoot = mix(uRootColor, vec3(0.0), (vRandom - 0.5) * 0.1);
+          
           // Interpolate softly over the length of the strand (smooth quadratic blending)
-          vec3 color = mix(uRootColor, uTipColor, curve * curve * (3.0 - 2.0 * curve));
+          vec3 color = mix(variedRoot, variedTip, curve * curve * (3.0 - 2.0 * curve));
 
           // Key Light (warm)
           vec3 keyLightDir = normalize(vec3(4.0, 5.0, 4.0));

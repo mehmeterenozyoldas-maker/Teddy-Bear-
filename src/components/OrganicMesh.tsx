@@ -110,8 +110,10 @@ function FurryPart({ geometry, rootColor, tipColor, thickness, length }: any) {
 export default function OrganicMesh() {
   const meshRef = useRef<THREE.Mesh>(null);
   const groupRef = useRef<THREE.Group>(null);
-  const leftEyeRef = useRef<THREE.Mesh>(null);
-  const rightEyeRef = useRef<THREE.Mesh>(null);
+  const leftEyeRef = useRef<THREE.Group>(null);
+  const rightEyeRef = useRef<THREE.Group>(null);
+  const leftEyeScaleRef = useRef<THREE.Group>(null);
+  const rightEyeScaleRef = useRef<THREE.Group>(null);
   const mouthGroupRef = useRef<THREE.Group>(null);
   const lowerJawRef = useRef<THREE.Group>(null);
   const innerMouthRef = useRef<THREE.Mesh>(null);
@@ -149,26 +151,73 @@ export default function OrganicMesh() {
     // Adjust interpolation speed and base facial behavior based on mood
     const baseSpeed = mood === 'hyper' ? 12 : mood === 'sleepy' ? 2 : mood === 'angry' ? 8 : 5;
     
+    let ambientArmL = 0;
+    let ambientArmR = 0;
+    let ambientLegL = 0;
+    let ambientLegR = 0;
+    let ambientNod = 0;
+    let ambientShake = 0;
+    let ambientBlink = 0;
+    
+    // Determine if user is idle (face not tracked, or far away and no activity)
+    const proxMax = storeState.proximityMaxDistance;
+    const isFar = userDistance > proxMax * 0.7;
+    const isIdle = (!isFaceActive || isFar) && activity < 0.1;
+    
+    if (isIdle) {
+         const t = state.clock.elapsedTime;
+
+         // Subtle, asynchronous relaxed breathing movements in limbs and head
+         const breathRate = mood === 'sleepy' ? 1.0 : (mood === 'hyper' ? 2.5 : 1.5);
+         ambientArmL += Math.sin(t * breathRate * 0.8) * 0.04;
+         ambientArmR += Math.sin(t * breathRate * 0.9 + 1.0) * 0.04;
+         ambientLegL += Math.sin(t * breathRate * 0.7 + 2.0) * 0.02;
+         ambientLegR += Math.sin(t * breathRate * 1.1 + 3.0) * 0.02;
+         ambientNod += Math.sin(t * breathRate * 0.5) * 0.03;
+         ambientShake += Math.cos(t * breathRate * 0.6) * 0.02;
+
+         // Occasional stretch mechanics
+         const stretchCycle = Math.sin(t * 0.3) * Math.sin(t * 0.5) * Math.sin(t * 1.3);
+         if (stretchCycle > 0.3) {
+             const stretchAmount = (stretchCycle - 0.3) * 1.5;
+             ambientArmL = stretchAmount * 0.5;
+             ambientArmR = -stretchAmount * 0.5;
+             ambientLegL = stretchAmount * 0.2;
+             ambientLegR = -stretchAmount * 0.2;
+             ambientNod -= stretchAmount * 0.15; 
+             ambientShake += Math.sin(t * 2) * stretchAmount * 0.3;
+         } else {
+             // Look around mechanics
+             const lookCycle = Math.cos(t * 0.4) * Math.cos(t * 0.8);
+             if (lookCycle > 0.4) {
+                 const lookAmount = (lookCycle - 0.4) * 2.0;
+                 ambientShake += Math.sin(t * 1.1) * lookAmount * 0.8;
+                 ambientNod += Math.cos(t * 1.3) * lookAmount * 0.4;
+                 if (Math.sin(t * 5) > 0.8) ambientBlink = 1;
+             }
+         }
+    }
+    
     if (armLRef.current) {
-        armLRef.current.rotation.x = THREE.MathUtils.lerp(armLRef.current.rotation.x, 0.2, delta * baseSpeed);
-        armLRef.current.rotation.z = THREE.MathUtils.lerp(armLRef.current.rotation.z, (-Math.PI / 3.5) + armRotations.left + calibration.armL, delta * baseSpeed);
+        armLRef.current.rotation.x = THREE.MathUtils.lerp(armLRef.current.rotation.x, 0.2 + ambientArmL, delta * baseSpeed);
+        armLRef.current.rotation.z = THREE.MathUtils.lerp(armLRef.current.rotation.z, (-Math.PI / 3.5) + armRotations.left + calibration.armL + ambientArmL, delta * baseSpeed);
     }
     if (armRRef.current) {
-        armRRef.current.rotation.x = THREE.MathUtils.lerp(armRRef.current.rotation.x, 0.2, delta * baseSpeed);
-        armRRef.current.rotation.z = THREE.MathUtils.lerp(armRRef.current.rotation.z, (Math.PI / 3.5) + armRotations.right + calibration.armR, delta * baseSpeed);
+        armRRef.current.rotation.x = THREE.MathUtils.lerp(armRRef.current.rotation.x, 0.2 + ambientArmR, delta * baseSpeed);
+        armRRef.current.rotation.z = THREE.MathUtils.lerp(armRRef.current.rotation.z, (Math.PI / 3.5) + armRotations.right + calibration.armR - ambientArmR, delta * baseSpeed);
     }
     if (legLRef.current) {
-        legLRef.current.rotation.x = THREE.MathUtils.lerp(legLRef.current.rotation.x, 0.2 + legRotations.left + calibration.legL, delta * baseSpeed);
+        legLRef.current.rotation.x = THREE.MathUtils.lerp(legLRef.current.rotation.x, 0.2 + legRotations.left + calibration.legL + ambientLegL, delta * baseSpeed);
     }
     if (legRRef.current) {
-        legRRef.current.rotation.x = THREE.MathUtils.lerp(legRRef.current.rotation.x, 0.2 + legRotations.right + calibration.legR, delta * baseSpeed);
+        legRRef.current.rotation.x = THREE.MathUtils.lerp(legRRef.current.rotation.x, 0.2 + legRotations.right + calibration.legR + ambientLegR, delta * baseSpeed);
     }
     
     // Calculate synthetic blendshapes from interaction
     let synthSmile = 0;
     let synthOpen = 0;
     let synthBrowUp = 0;
-    let synthBlink = 0;
+    let synthBlink = ambientBlink;
     let headNod = 0;
     let headShake = 0;
     let interactionNod = 0;
@@ -177,7 +226,6 @@ export default function OrganicMesh() {
     // Expand eyes based on proximity (UltraSonic or camera tracking proxy if we used face size)
     // Distance < proxMax means expanding. mapping proxMax..10 to 0..0.8
     let proximityWideEyes = 0;
-    const proxMax = storeState.proximityMaxDistance;
     if (userDistance < proxMax) {
       proximityWideEyes = Math.max(0, Math.min(1.0, (proxMax - userDistance) / (proxMax * 0.8)));
       synthBrowUp += proximityWideEyes * 0.8; 
@@ -262,9 +310,11 @@ export default function OrganicMesh() {
     synthOpen = Math.max(0, Math.min(1, synthOpen));
 
     if (groupRef.current) {
-       const targetRotX = (isFaceActive ? storeState.headRotation.x : headNod) + calibration.x;
-       const targetRotY = (isFaceActive ? storeState.headRotation.y : headShake) + calibration.y;
-       const targetRotZ = (isFaceActive ? storeState.headRotation.z : (headShake * 0.5)) + calibration.z;
+       // When far away, blend out face tracking influence and inject ambient motions
+       const blendFactor = isFar ? 0.3 : 1.0;
+       const targetRotX = (isFaceActive ? storeState.headRotation.x * blendFactor : 0) + headNod + ambientNod + calibration.x;
+       const targetRotY = (isFaceActive ? storeState.headRotation.y * blendFactor : 0) + headShake + ambientShake + calibration.y;
+       const targetRotZ = (isFaceActive ? storeState.headRotation.z * blendFactor : 0) + (headShake * 0.5) + (ambientShake * 0.5) + calibration.z;
 
        groupRef.current.rotation.x = THREE.MathUtils.lerp(groupRef.current.rotation.x, targetRotX, delta * baseSpeed);
        groupRef.current.rotation.y = THREE.MathUtils.lerp(groupRef.current.rotation.y, targetRotY, delta * baseSpeed);
@@ -297,19 +347,65 @@ export default function OrganicMesh() {
        // Base eye scale is boosted by proximityWideEyes
        const targetEyeScaleBase = 1.0 + (proximityWideEyes * 0.4);
 
+        // Breathe mechanics
+        let targetScaleY = 1.0;
+        let targetScaleZ = 1.0;
+        let targetScaleX = 1.0;
+
+        if (isIdle) {
+            // Nuanced, relaxed breathing when idle
+            const relaxedBreathPhase = state.clock.elapsedTime * (mood === 'sleepy' ? 1.0 : (mood === 'hyper' ? 3.0 : 1.5));
+            targetScaleY = 1.0 + Math.sin(relaxedBreathPhase) * 0.03 + Math.sin(relaxedBreathPhase * 0.5) * 0.01;
+            targetScaleZ = 1.0 + Math.sin(relaxedBreathPhase + 1.2) * 0.015;
+            targetScaleX = 1.0 + Math.sin(relaxedBreathPhase + 2.5) * 0.01;
+        } else {
+            // Standard/Active breathing
+            const breathPhase = state.clock.elapsedTime * (mood === 'sleepy' ? 1.5 : (mood === 'hyper' ? 6.0 : 3.0));
+            targetScaleY = 1.0 + Math.sin(breathPhase) * (mood === 'sleepy' ? 0.03 : 0.015);
+            targetScaleZ = 1.0 + Math.sin(breathPhase + 1.0) * 0.015;
+            targetScaleX = 1.0 + Math.sin(breathPhase + 2.0) * 0.01;
+        }
+
+        groupRef.current.scale.y = THREE.MathUtils.lerp(groupRef.current.scale.y, targetScaleY, delta * 5);
+        groupRef.current.scale.z = THREE.MathUtils.lerp(groupRef.current.scale.z, targetScaleZ, delta * 5);
+        groupRef.current.scale.x = THREE.MathUtils.lerp(groupRef.current.scale.x, targetScaleX, delta * 5);
+
        // Blink animation
-       if (leftEyeRef.current) {
+       if (leftEyeScaleRef.current) {
          const targetScaleY = targetEyeScaleBase - Math.min(blinkL * 1.5, 0.95);
-         leftEyeRef.current.scale.y = THREE.MathUtils.lerp(leftEyeRef.current.scale.y, targetScaleY, delta * 15);
-         leftEyeRef.current.scale.x = THREE.MathUtils.lerp(leftEyeRef.current.scale.x, targetEyeScaleBase, delta * 15);
-         leftEyeRef.current.scale.z = THREE.MathUtils.lerp(leftEyeRef.current.scale.z, targetEyeScaleBase, delta * 15);
+         leftEyeScaleRef.current.scale.y = THREE.MathUtils.lerp(leftEyeScaleRef.current.scale.y, targetScaleY, delta * 15);
+         leftEyeScaleRef.current.scale.x = THREE.MathUtils.lerp(leftEyeScaleRef.current.scale.x, targetEyeScaleBase, delta * 15);
+         leftEyeScaleRef.current.scale.z = THREE.MathUtils.lerp(leftEyeScaleRef.current.scale.z, targetEyeScaleBase, delta * 15);
        }
-       if (rightEyeRef.current) {
+       if (rightEyeScaleRef.current) {
          const targetScaleY = targetEyeScaleBase - Math.min(blinkR * 1.5, 0.95);
-         rightEyeRef.current.scale.y = THREE.MathUtils.lerp(rightEyeRef.current.scale.y, targetScaleY, delta * 15);
-         rightEyeRef.current.scale.x = THREE.MathUtils.lerp(rightEyeRef.current.scale.x, targetEyeScaleBase, delta * 15);
-         rightEyeRef.current.scale.z = THREE.MathUtils.lerp(rightEyeRef.current.scale.z, targetEyeScaleBase, delta * 15);
+         rightEyeScaleRef.current.scale.y = THREE.MathUtils.lerp(rightEyeScaleRef.current.scale.y, targetScaleY, delta * 15);
+         rightEyeScaleRef.current.scale.x = THREE.MathUtils.lerp(rightEyeScaleRef.current.scale.x, targetEyeScaleBase, delta * 15);
+         rightEyeScaleRef.current.scale.z = THREE.MathUtils.lerp(rightEyeScaleRef.current.scale.z, targetEyeScaleBase, delta * 15);
        }
+
+       // Look-At IK for eyes
+       const eyeTarget = new THREE.Vector3();
+       if (isFaceActive) {
+         // Follow User Face (Derived from headRotation)
+         eyeTarget.set(storeState.headRotation.y * -15, storeState.headRotation.x * 15, 10);
+       } else {
+         // Procedural ambient looking based on mood & time
+         const lookTime = state.clock.elapsedTime * 0.5;
+         let lookX = Math.sin(lookTime * 2.1) * 3;
+         let lookY = Math.cos(lookTime * 1.5) * 2;
+         if (mood === 'sleepy') lookY -= 3;
+         if (mood === 'angry') {
+             lookX = Math.sin(lookTime * 10) * 0.5;
+         }
+         eyeTarget.set(lookX, lookY, 10);
+       }
+       
+       // Convert dummy target to world pos, assuming bear is at origin.
+       // Group rotates, but eyeballs are inside the rotating group, so lookAt needs a world position!
+       const worldEyeTarget = groupRef.current.localToWorld(eyeTarget.clone());
+       if (leftEyeRef.current) leftEyeRef.current.lookAt(worldEyeTarget);
+       if (rightEyeRef.current) rightEyeRef.current.lookAt(worldEyeTarget);
 
        // Eyebrow animations
        if (leftBrowRef.current) {
@@ -464,14 +560,14 @@ export default function OrganicMesh() {
     const mainGeo = processGeo(BufferGeometryUtils.mergeGeometries(mainGeos));
 
     // Arms
-    const armGeo = new THREE.CapsuleGeometry(0.35, 0.6, 32, 32);
-    armGeo.translate(0, -0.4, 0); // Pivot at top
+    const armGeo = new THREE.CapsuleGeometry(0.42, 0.4, 32, 32);
+    armGeo.translate(0, -0.3, 0); // Pivot at top
     const armLGeo = processGeo(armGeo.clone());
     const armRGeo = processGeo(armGeo.clone());
 
     // Legs
-    const legGeo = new THREE.CapsuleGeometry(0.45, 0.5, 32, 32);
-    legGeo.translate(0, -0.3, 0); // Pivot at top
+    const legGeo = new THREE.CapsuleGeometry(0.52, 0.3, 32, 32);
+    legGeo.translate(0, -0.25, 0); // Pivot at top
     const legLGeo = processGeo(legGeo.clone());
     const legRGeo = processGeo(legGeo.clone());
 
@@ -518,7 +614,7 @@ export default function OrganicMesh() {
           length={length} 
       />
 
-      <group ref={armLRef} position={[-1.3, -0.05, 0.4]} rotation={[0.2, 0, -Math.PI / 3.5]}>
+      <group ref={armLRef} position={[-1.2, -0.05, 0.4]} rotation={[0.2, 0, -Math.PI / 3.5]}>
         <FurryPart 
             geometry={geometries.armLGeo} 
             rootColor={rootColor} 
@@ -528,7 +624,7 @@ export default function OrganicMesh() {
         />
       </group>
 
-      <group ref={armRRef} position={[1.3, -0.05, 0.4]} rotation={[0.2, 0, Math.PI / 3.5]}>
+      <group ref={armRRef} position={[1.2, -0.05, 0.4]} rotation={[0.2, 0, Math.PI / 3.5]}>
         <FurryPart 
             geometry={geometries.armRGeo} 
             rootColor={rootColor} 
@@ -538,7 +634,7 @@ export default function OrganicMesh() {
         />
       </group>
 
-      <group ref={legLRef} position={[-0.55, -1.8, 0.6]} rotation={[0.2, 0, 0.1]}>
+      <group ref={legLRef} position={[-0.55, -1.6, 0.6]} rotation={[0.2, 0, 0.1]}>
         <FurryPart 
             geometry={geometries.legLGeo} 
             rootColor={rootColor} 
@@ -548,7 +644,7 @@ export default function OrganicMesh() {
         />
       </group>
 
-      <group ref={legRRef} position={[0.55, -1.8, 0.6]} rotation={[0.2, 0, -0.1]}>
+      <group ref={legRRef} position={[0.55, -1.6, 0.6]} rotation={[0.2, 0, -0.1]}>
         <FurryPart 
             geometry={geometries.legRGeo} 
             rootColor={rootColor} 
@@ -561,10 +657,22 @@ export default function OrganicMesh() {
       {/* Face Details - Placed without fur so they stand out */}
       <group>
         {/* Left Eye */}
-        <mesh ref={leftEyeRef} position={[-0.48, 0.75, 1.20]}>
-          <sphereGeometry args={[0.12, 32, 32]} />
-          <meshStandardMaterial color="#050505" roughness={0.05} metalness={0.9} />
-        </mesh>
+        <group ref={leftEyeScaleRef} position={[-0.48, 0.75, 1.15]}>
+          <group ref={leftEyeRef}>
+            <mesh>
+              <sphereGeometry args={[0.13, 32, 32]} />
+              <meshStandardMaterial color="#f0f0f0" roughness={0.1} metalness={0.1} />
+            </mesh>
+            <mesh position={[0, 0, 0.08]}>
+              <sphereGeometry args={[0.08, 32, 32]} />
+              <meshStandardMaterial color="#3b1f14" roughness={0.1} metalness={0.8} />
+            </mesh>
+            <mesh position={[0, 0, 0.12]}>
+              <sphereGeometry args={[0.05, 32, 32]} />
+              <meshStandardMaterial color="#050505" roughness={0.0} metalness={0.9} />
+            </mesh>
+          </group>
+        </group>
         
         {/* Left Brow */}
         <mesh ref={leftBrowRef} position={[-0.45, 0.90, 1.15]} rotation={[0, 0, 0]}>
@@ -573,10 +681,22 @@ export default function OrganicMesh() {
         </mesh>
 
         {/* Right Eye */}
-        <mesh ref={rightEyeRef} position={[0.48, 0.75, 1.20]}>
-          <sphereGeometry args={[0.12, 32, 32]} />
-          <meshStandardMaterial color="#050505" roughness={0.05} metalness={0.9} />
-        </mesh>
+        <group ref={rightEyeScaleRef} position={[0.48, 0.75, 1.15]}>
+          <group ref={rightEyeRef}>
+            <mesh>
+              <sphereGeometry args={[0.13, 32, 32]} />
+              <meshStandardMaterial color="#f0f0f0" roughness={0.1} metalness={0.1} />
+            </mesh>
+            <mesh position={[0, 0, 0.08]}>
+              <sphereGeometry args={[0.08, 32, 32]} />
+              <meshStandardMaterial color="#3b1f14" roughness={0.1} metalness={0.8} />
+            </mesh>
+            <mesh position={[0, 0, 0.12]}>
+              <sphereGeometry args={[0.05, 32, 32]} />
+              <meshStandardMaterial color="#050505" roughness={0.0} metalness={0.9} />
+            </mesh>
+          </group>
+        </group>
 
         {/* Right Brow */}
         <mesh ref={rightBrowRef} position={[0.45, 0.90, 1.15]} rotation={[0, 0, 0]}>

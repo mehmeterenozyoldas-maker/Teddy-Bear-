@@ -9,6 +9,8 @@ export default function ArduinoConnection() {
   const serialWriter = useStore(state => state.serialWriter);
   const mood = useStore(state => state.mood);
   const interactionMode = useStore(state => state.interactionMode);
+  const ledColor = useStore(state => state.ledColor);
+  const isHardwareTouched = useStore(state => state.isHardwareTouched);
 
   // 1. Send Servo Commands Periodically
   useEffect(() => {
@@ -59,7 +61,14 @@ export default function ArduinoConnection() {
     };
 
     if (interactionMode === 'Pinch') {
-      triggerVibe(150); // Sharp, short vibration
+      const playPattern = async () => {
+        await triggerVibe(80);
+        await new Promise(r => setTimeout(r, 150));
+        await triggerVibe(120);
+        await new Promise(r => setTimeout(r, 150));
+        await triggerVibe(80);
+      };
+      playPattern();
     }
   }, [interactionMode, serialWriter]);
 
@@ -74,12 +83,45 @@ export default function ArduinoConnection() {
     }
   }, [mood, serialWriter]);
 
+  // Update LED Color automatically based on mood & touch
+  useEffect(() => {
+    let r = 0, g = 0, b = 0;
+    if (isHardwareTouched) {
+       r = 255; g = 150; b = 255; // Pink when touched
+    } else {
+       if (mood === 'sleepy') { r = 0; g = 0; b = 50; }
+       else if (mood === 'angry') { r = 255; g = 0; b = 0; }
+       else if (mood === 'loving') { r = 255; g = 50; b = 100; }
+       else if (mood === 'hyper') { r = 0; g = 255; b = 0; }
+       else { r = 50; g = 50; b = 50; } // neutral
+    }
+    useStore.setState({ ledColor: { r, g, b } });
+  }, [mood, isHardwareTouched]);
+
+  // 3. Send Neopixel Commands
+  useEffect(() => {
+    if (!serialWriter) return;
+    const sendLed = async () => {
+      try {
+        await serialWriter.write(`C${Math.floor(ledColor.r)},${Math.floor(ledColor.g)},${Math.floor(ledColor.b)}\n`);
+      } catch (err) {}
+    };
+    sendLed();
+  }, [ledColor, serialWriter]);
+
   const generateArduinoCode = (version: string) => {
-    let code = `#include <Servo.h>\n\nServo servoX; // Pan (Left/Right)\nServo servoY; // Tilt (Up/Down)\n\n`;
+    let code = `#include <Servo.h>\n`;
+    if (version === 'advanced') {
+      code += `#include <Adafruit_NeoPixel.h>\n`;
+    }
+    code += `\nServo servoX; // Pan (Left/Right)\nServo servoY; // Tilt (Up/Down)\n\n`;
 
     // Global variables
     if (version === 'tokens_only' || version === 'advanced') {
       code += `// TUI Buttons\nconst int btnHyper = 2;\nconst int btnSleepy = 3;\nconst int btnLoving = 4;\nconst int btnAngry = 5;\n\n// Debounce state\nunsigned long lastDebounceTime = 0;\nunsigned long debounceDelay = 200;\n\n`;
+    }
+    if (version === 'advanced') {
+      code += `// Capacitive Touch\nconst int touchPin = 12;\nint lastTouchState = 0;\n\n// Neopixels\n#define PIN_NEO 11\n#define NUMPIXELS 8\nAdafruit_NeoPixel pixels(NUMPIXELS, PIN_NEO, NEO_GRB + NEO_KHZ800);\n\n`;
     }
     if (version === 'vibro' || version === 'advanced') {
       code += `// Vibration Motor\nconst int vibePin = 6;\nunsigned long vibeUntil = 0;\n\n`;
@@ -106,10 +148,16 @@ export default function ArduinoConnection() {
     if (version === 'distance_only' || version === 'vibro' || version === 'advanced') {
       code += `\n  // Configure Ultrasonic\n  pinMode(trigPin, OUTPUT);\n  pinMode(echoPin, INPUT);\n`;
     }
+    if (version === 'advanced') {
+      code += `\n  // Configure Touch & Neopixels\n  pinMode(touchPin, INPUT);\n  pixels.begin();\n  pixels.clear();\n  pixels.show();\n`;
+    }
 
     code += `\n  // Initialize servos to center\n  servoX.write(90);\n  servoY.write(90);\n}\n\nvoid loop() {\n`;
 
     // Loop
+    if (version === 'advanced') {
+      code += `  // Handle Touch\n  int currentTouch = digitalRead(touchPin);\n  if (currentTouch != lastTouchState) {\n    lastTouchState = currentTouch;\n    Serial.print("TOUCH:");\n    Serial.println(currentTouch);\n  }\n\n`;
+    }
     if (version === 'vibro' || version === 'advanced') {
       code += `  // Handle Vibration\n  if (millis() < vibeUntil) {\n    digitalWrite(vibePin, HIGH);\n  } else {\n    digitalWrite(vibePin, LOW);\n  }\n\n`;
     }
@@ -139,6 +187,10 @@ export default function ArduinoConnection() {
     if (version === 'vibro' || version === 'advanced') {
       code += `    if (data.startsWith("V")) {\n      int duration = data.substring(1).toInt();\n      vibeUntil = millis() + duration;\n    }\n\n`;
     }
+    
+    if (version === 'advanced') {
+      code += `    if (data.startsWith("C")) {\n      int firstComma = data.indexOf(',');\n      int secondComma = data.indexOf(',', firstComma + 1);\n      int r = data.substring(1, firstComma).toInt();\n      int g = data.substring(firstComma + 1, secondComma).toInt();\n      int b = data.substring(secondComma + 1).toInt();\n      for(int i=0; i<NUMPIXELS; i++) { pixels.setPixelColor(i, pixels.Color(r,g,b)); }\n      pixels.show();\n    }\n\n`;
+    }
 
     code += `    int xIndex = data.indexOf('X');\n    int yIndex = data.indexOf('Y');\n    if (xIndex != -1 && yIndex != -1) {\n      String xStr = data.substring(xIndex + 1, yIndex);\n      String yStr = data.substring(yIndex + 1);\n      if (xStr.length() > 0 && yStr.length() > 0) {\n        int xAngle = xStr.toInt();\n        int yAngle = yStr.toInt();\n        servoX.write(constrain(xAngle, 0, 180));\n        servoY.write(constrain(yAngle, 0, 180));\n      }\n    }\n  }\n}\n`;
 
@@ -164,6 +216,12 @@ export default function ArduinoConnection() {
             <li>1x 3V Coin Vibration Motor</li>
             <li>1x NPN Transistor (2N2222) or N-MOSFET (logic level)</li>
             <li>1x 1kΩ Resistor & 1x 1N4001 Diode</li>
+          </>
+        )}
+        {version === 'advanced' && (
+          <>
+            <li>1x TTP223 Capacitive Touch Sensor</li>
+            <li>1x WS2812B Neopixel Ring/Strip (e.g. 8 LEDs)</li>
           </>
         )}
       </ul>
@@ -193,6 +251,12 @@ export default function ArduinoConnection() {
               <li><b>Step 5:</b> 1N4001 diode parallel to motor. <b>Cathode (stripe)</b> to 5V, <b>Anode</b> to Collector.</li>
             </ul>
           </li>
+        )}
+        {version === 'advanced' && (
+          <>
+            <li><b>Capacitive Touch:</b> Connect VCC to <b>5V</b>, GND to <b>GND</b>, Logic/SIG to Pin <b>12</b>.</li>
+            <li><b>Neopixels:</b> Connect VCC to <b>Ext 5V/Arduino 5V</b>, GND to <b>GND</b>, DIN to Pin <b>11</b>.</li>
+          </>
         )}
         <li><b>Upload</b> the sketch below, then click "Connect Arduino" above.</li>
       </ol>

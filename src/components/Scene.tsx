@@ -1,9 +1,8 @@
 import { OrbitControls, Environment } from '@react-three/drei';
 import { EffectComposer, Bloom, N8AO, DepthOfField } from '@react-three/postprocessing';
-import { BlendFunction } from 'postprocessing';
-import { useThree } from '@react-three/fiber';
-import OrganicMesh from './OrganicMesh';
 import { useStore } from '../store';
+import OrganicMesh from './OrganicMesh';
+import Particles from './Particles';
 
 export default function Scene() {
   const storeAmbientLight = useStore(state => state.ambientLight);
@@ -29,6 +28,7 @@ export default function Scene() {
       <Environment preset={isNightMode ? "night" : "apartment"} />
 
       <OrganicMesh />
+      <Particles />
 
       <OrbitControls makeDefault autoRotate autoRotateSpeed={0.1} enablePan={false} enableZoom={true} minDistance={1.5} maxDistance={8} />
 

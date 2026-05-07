@@ -61,6 +61,11 @@ interface AppState {
   isPointerDown: boolean;
   setIsPointerDown: (down: boolean) => void;
   
+  isHardwareTouched: boolean;
+  setIsHardwareTouched: (touched: boolean) => void;
+  ledColor: { r: number, g: number, b: number };
+  setLedColor: (color: { r: number, g: number, b: number }) => void;
+  
   // Tracking State
   armTrackingActive: boolean;
   setArmTrackingActive: (active: boolean) => void;
@@ -125,6 +130,11 @@ export const useStore = create<AppState>((set, get) => ({
   setInteractionActivity: (activity) => set({ interactionActivity: activity }),
   isPointerDown: false,
   setIsPointerDown: (down) => set({ isPointerDown: down }),
+
+  isHardwareTouched: false,
+  setIsHardwareTouched: (touched) => set({ isHardwareTouched: touched }),
+  ledColor: { r: 0, g: 0, b: 0 },
+  setLedColor: (color) => set({ ledColor: color }),
 
   armTrackingActive: false,
   setArmTrackingActive: (active) => set({ armTrackingActive: active }),
@@ -196,6 +206,12 @@ export const useStore = create<AppState>((set, get) => ({
                     } else if (get().mood === 'sleepy' && !isNaN(l) && l > threshold + 100) {
                       set({ mood: 'neutral' });
                     }
+                  }
+                } else if (trimmed.startsWith('TOUCH:')) {
+                  const touched = trimmed.substring(6) === '1';
+                  set({ isHardwareTouched: touched });
+                  if (touched) {
+                    set({ interactionMode: 'Pet', interactionActivity: 1.0 });
                   }
                 }
               }
