@@ -9,21 +9,149 @@ import { useControls, button } from 'leva';
 import { useStore } from '../store';
 
 // Lower instance count to improve performance while still looking full
-const INSTANCE_COUNT = 200000;
+const INSTANCE_COUNT = 150000;
 
-function FurryPart({ geometry, rootColor, tipColor, thickness, length }: any) {
+const shellVertexShader = `
+  uniform float uShellIndex;
+  uniform float uTotalShells;
+  uniform float uLength;
+  uniform float uTime;
+  uniform sampler2D stateTexture;
+  uniform bool uHasState;
+
+  varying vec2 vUv;
+  varying vec3 vNormal;
+  varying vec3 vViewPosition;
+  varying float vHeight;
+  varying float vInteraction;
+
+  void main() {
+    vUv = uv;
+    vNormal = normalize(normalMatrix * normal);
+    
+    float height = uShellIndex / uTotalShells;
+    vHeight = height;
+
+    vec2 disp = vec2(0.0);
+    vec2 vel = vec2(0.0);
+    if (uHasState) {
+      vec4 stateInfo = texture2D(stateTexture, uv);
+      disp = stateInfo.rg;
+      vel = stateInfo.ba;
+    }
+    
+    vInteraction = smoothstep(0.4, 4.0, length(vel));
+
+    vec3 p = position;
+    
+    // Approximate local tangent space
+    vec3 up = vec3(0.0, 1.0, 0.0);
+    vec3 axis = cross(up, normal);
+    float angle = acos(dot(up, normal));
+    mat3 rot = mat3(1.0);
+    if (length(axis) > 0.0001) {
+      axis = normalize(axis);
+      float s = sin(angle);
+      float c = cos(angle);
+      float oc = 1.0 - c;
+      rot = mat3(
+        oc * axis.x * axis.x + c,           oc * axis.x * axis.y - axis.z * s,  oc * axis.z * axis.x + axis.y * s,
+        oc * axis.x * axis.y + axis.z * s,  oc * axis.y * axis.y + c,           oc * axis.y * axis.z - axis.x * s,
+        oc * axis.z * axis.x - axis.y * s,  oc * axis.y * axis.z + axis.x * s,  oc * axis.z * axis.z + c
+      );
+    }
+
+    vec3 offset = vec3(0.0);
+    offset.x += disp.x * (height * height) * uLength * 1.5;
+    offset.z += disp.y * (height * height) * uLength * 1.5;
+    
+    // Ambient flutter
+    float breeze = sin(uTime * 1.8 + position.x * 2.5 + position.y * 3.1) * 0.012 * height;
+    offset.x += breeze;
+
+    p = p + rot * offset + normal * height * uLength;
+
+    vec4 mvPosition = modelViewMatrix * vec4(p, 1.0);
+    vViewPosition = -mvPosition.xyz;
+    gl_Position = projectionMatrix * mvPosition;
+  }
+`;
+
+const shellFragmentShader = `
+  uniform vec3 uRootColor;
+  uniform vec3 uTipColor;
+  uniform float uShellIndex;
+  uniform float uTotalShells;
+  uniform float uFurlDensity;
+
+  varying vec2 vUv;
+  varying vec3 vNormal;
+  varying vec3 vViewPosition;
+  varying float vHeight;
+  varying float vInteraction;
+
+  float hash(vec2 p) {
+    return fract(sin(dot(p, vec2(127.1, 311.7))) * 43758.5453123);
+  }
+
+  float noise(vec2 p) {
+    vec2 i = floor(p);
+    vec2 f = fract(p);
+    vec2 u = f * f * (3.0 - 2.0 * f);
+    return mix(mix(hash(i + vec2(0.0, 0.0)), hash(i + vec2(1.0, 0.0)), u.x),
+               mix(hash(i + vec2(0.0, 1.0)), hash(i + vec2(1.0, 1.0)), u.x), u.y);
+  }
+
+  void main() {
+    float density = noise(vUv * uFurlDensity);
+    
+    float threshold = smoothstep(0.02, 0.95, vHeight);
+    if (vHeight > 0.0 && density < threshold) {
+      discard;
+    }
+
+    vec3 baseColor = mix(uRootColor, uTipColor, vHeight);
+    vec3 glow = vec3(1.0, 0.92, 0.72);
+    vec3 color = mix(baseColor, baseColor + glow * vHeight * 1.4, vInteraction * 0.65);
+
+    vec3 N = normalize(vNormal);
+    vec3 V = normalize(vViewPosition);
+
+    vec3 L_key = normalize(vec3(4.0, 5.0, 4.0));
+    float diff_key = max(dot(N, L_key), 0.0);
+    
+    vec3 L_fill = normalize(vec3(-4.0, 2.0, 4.0));
+    float diff_fill = max(dot(N, L_fill), 0.0);
+
+    float viewDot = max(dot(V, N), 0.0);
+    float rim = pow(1.0 - viewDot, 4.0);
+    vec3 rimColor = vec3(1.0, 0.96, 0.88);
+
+    float ao = mix(0.12, 1.0, vHeight);
+
+    vec3 litColor = color * (vec3(0.12) + vec3(0.8) * diff_key + vec3(0.25) * diff_fill) * ao;
+    
+    float rimBoost = mix(1.0, 2.5, vInteraction);
+    litColor += rimColor * rim * 1.3 * vHeight * rimBoost;
+
+    gl_FragColor = vec4(litColor, 1.0);
+  }
+`;
+
+function FurryPart({ geometry, rootColor, tipColor, thickness, length, partName, furMode, shellCount, furlDensity }: any) {
   const [samplerData, setSamplerData] = useState<{ 
     positionsTexture: THREE.DataTexture, 
     normalsTexture: THREE.DataTexture 
   } | null>(null);
 
   const mousePositionRef = useRef(new THREE.Vector3(-999, -999, -999));
+  const stateTextureRef = useRef<THREE.Texture | null>(null);
+  const meshRef = useRef<THREE.Mesh>(null);
 
   useEffect(() => {
     const tempMesh = new THREE.Mesh(geometry);
     const sampler = new MeshSurfaceSampler(tempMesh).build();
     
-    // Scale down instance count per part based on surface area
     const actualCount = Math.floor(INSTANCE_COUNT * (geometry.boundingSphere?.radius || 1) * 0.5);
     const width = Math.ceil(Math.sqrt(actualCount));
     const height = width;
@@ -58,37 +186,112 @@ function FurryPart({ geometry, rootColor, tipColor, thickness, length }: any) {
     setSamplerData({ positionsTexture, normalsTexture });
   }, [geometry]);
 
-  const meshRef = useRef<THREE.Mesh>(null);
+  // Construct concentric shell materials
+  const shells = useMemo(() => {
+    const arr = [];
+    for (let i = 0; i < shellCount; i++) {
+      const mat = new THREE.ShaderMaterial({
+        vertexShader: shellVertexShader,
+        fragmentShader: shellFragmentShader,
+        uniforms: {
+          uShellIndex: { value: i },
+          uTotalShells: { value: shellCount },
+          uLength: { value: length },
+          uTime: { value: 0 },
+          stateTexture: { value: null },
+          uHasState: { value: false },
+          uRootColor: { value: new THREE.Color(rootColor) },
+          uTipColor: { value: new THREE.Color(tipColor) },
+          uFurlDensity: { value: furlDensity }
+        },
+        depthWrite: i === 0,
+        depthTest: true
+      });
+      arr.push(mat);
+    }
+    return arr;
+  }, [shellCount, rootColor, tipColor, length, furlDensity]);
+
+  // Handle continuous simulation variables
+  useFrame((state) => {
+    if (furMode === 'Volumetric Shells (Plush)') {
+      const tex = stateTextureRef.current;
+      shells.forEach((mat) => {
+        mat.uniforms.uTime.value = state.clock.elapsedTime;
+        mat.uniforms.uRootColor.value.set(rootColor);
+        mat.uniforms.uTipColor.value.set(tipColor);
+        mat.uniforms.uLength.value = length;
+        mat.uniforms.uFurlDensity.value = furlDensity;
+        if (tex) {
+          mat.uniforms.stateTexture.value = tex;
+          mat.uniforms.uHasState.value = true;
+        } else {
+          mat.uniforms.uHasState.value = false;
+        }
+      });
+    }
+  });
 
   return (
     <group>
-      <mesh 
-        ref={meshRef}
-        geometry={geometry}
-        onPointerMove={(e) => {
-          const localPoint = e.point.clone();
-          if (meshRef.current) {
-            meshRef.current.worldToLocal(localPoint);
-          }
-          mousePositionRef.current.copy(localPoint);
-        }}
-        onPointerDown={(e) => {
-           useStore.getState().setIsPointerDown(true);
-        }}
-        onPointerUp={(e) => {
-           useStore.getState().setIsPointerDown(false);
-        }}
-        onPointerOut={() => {
-          mousePositionRef.current.set(-999, -999, -999);
-          useStore.getState().setIsPointerDown(false);
-        }}
-      >
-        <meshPhysicalMaterial 
-          color={tipColor}
-          roughness={1.0}
-          metalness={0.0}
-        />
-      </mesh>
+      {/* Base skin rendering or Concentric Volumetric layers */}
+      {furMode === 'Instanced Strands (Fuzzy)' ? (
+        <mesh 
+          ref={meshRef}
+          geometry={geometry}
+          onPointerMove={(e) => {
+            const localPoint = e.point.clone();
+            if (meshRef.current) {
+              meshRef.current.worldToLocal(localPoint);
+            }
+            mousePositionRef.current.copy(localPoint);
+          }}
+          onPointerDown={(e) => {
+             useStore.getState().setIsPointerDown(true);
+             useStore.getState().setActiveInteractivePart(partName);
+          }}
+          onPointerUp={(e) => {
+             useStore.getState().setIsPointerDown(false);
+          }}
+          onPointerOut={() => {
+            mousePositionRef.current.set(-999, -999, -999);
+            useStore.getState().setIsPointerDown(false);
+          }}
+        >
+          <meshPhysicalMaterial 
+            color={tipColor}
+            roughness={1.0}
+            metalness={0.0}
+          />
+        </mesh>
+      ) : (
+        // Concentric shell meshes
+        shells.map((mat, idx) => (
+          <mesh 
+            key={idx} 
+            geometry={geometry} 
+            material={mat}
+            onPointerMove={(e) => {
+              const localPoint = e.point.clone();
+              if (meshRef.current) {
+                meshRef.current.worldToLocal(localPoint);
+              }
+              mousePositionRef.current.copy(localPoint);
+            }}
+            onPointerDown={(e) => {
+               useStore.getState().setIsPointerDown(true);
+               useStore.getState().setActiveInteractivePart(partName);
+            }}
+            onPointerUp={(e) => {
+               useStore.getState().setIsPointerDown(false);
+            }}
+            onPointerOut={() => {
+              mousePositionRef.current.set(-999, -999, -999);
+              useStore.getState().setIsPointerDown(false);
+            }}
+          />
+        ))
+      )}
       
       {samplerData && (
         <HairSystem 
@@ -101,6 +304,8 @@ function FurryPart({ geometry, rootColor, tipColor, thickness, length }: any) {
           tipColor={tipColor}
           thickness={thickness}
           length={length}
+          stateTextureRef={stateTextureRef}
+          visible={furMode === 'Instanced Strands (Fuzzy)'}
         />
       )}
     </group>
@@ -127,6 +332,9 @@ export default function OrganicMesh() {
   const prevSmileR = useRef(0);
   const prevMouthOpen = useRef(0);
 
+  const breathPhaseRef = useRef(0);
+  const breathRateRef = useRef(1.5);
+
   const armLRef = useRef<THREE.Group>(null);
   const armRRef = useRef<THREE.Group>(null);
   const legLRef = useRef<THREE.Group>(null);
@@ -139,7 +347,7 @@ export default function OrganicMesh() {
   // Smoothly interpolate the group rotation towards headRotation and animate facial features
   useFrame((state, delta) => {
     const storeState = useStore.getState();
-    const isFaceActive = storeState.faceTrackingActive;
+    const isFaceActive = storeState.faceTrackingActive || storeState.faceSimulated;
     const activity = storeState.interactionActivity;
     const mode = storeState.interactionMode;
     const armRotations = storeState.armRotations;
@@ -151,6 +359,21 @@ export default function OrganicMesh() {
     // Adjust interpolation speed and base facial behavior based on mood
     const baseSpeed = mood === 'hyper' ? 12 : mood === 'sleepy' ? 2 : mood === 'angry' ? 8 : 5;
     
+    // Determine if user is idle (face not tracked, or far away and no activity)
+    const proxMax = storeState.proximityMaxDistance;
+    const isFar = userDistance > proxMax * 0.7;
+    const isIdle = (!isFaceActive || isFar) && activity < 0.1;
+
+    // Accumulate breathing phase continuously based on mood and activity
+    const targetBreathRate = mood === 'sleepy' ? (isIdle ? 1.0 : 1.5) : (mood === 'hyper' ? (isIdle ? 3.0 : 6.0) : (isIdle ? 1.5 : 3.0));
+    breathRateRef.current = THREE.MathUtils.lerp(breathRateRef.current, targetBreathRate, delta * 3.0);
+    breathPhaseRef.current += delta * breathRateRef.current;
+    
+    // Phase 1 - Basic Input Interpolation Clamps (ensures lerping is bounded within [0, 1] to eliminate twitching under frame stutter)
+    const alphaBase = Math.min(1.0, delta * baseSpeed);
+    const alphaFast = Math.min(1.0, delta * 15);
+    const alphaSlow = Math.min(1.0, delta * 5);
+    
     let ambientArmL = 0;
     let ambientArmR = 0;
     let ambientLegL = 0;
@@ -160,23 +383,18 @@ export default function OrganicMesh() {
     let ambientRoll = 0;
     let ambientBlink = 0;
     
-    // Determine if user is idle (face not tracked, or far away and no activity)
-    const proxMax = storeState.proximityMaxDistance;
-    const isFar = userDistance > proxMax * 0.7;
-    const isIdle = (!isFaceActive || isFar) && activity < 0.1;
-    
     if (isIdle) {
          const t = state.clock.elapsedTime;
+         const p = breathPhaseRef.current;
 
          // Subtle, asynchronous relaxed breathing movements in limbs and head
-         const breathRate = mood === 'sleepy' ? 1.0 : (mood === 'hyper' ? 2.5 : 1.5);
-         ambientArmL += Math.sin(t * breathRate * 0.8) * 0.04;
-         ambientArmR += Math.sin(t * breathRate * 0.9 + 1.0) * 0.04;
-         ambientLegL += Math.sin(t * breathRate * 0.7 + 2.0) * 0.02;
-         ambientLegR += Math.sin(t * breathRate * 1.1 + 3.0) * 0.02;
-         ambientNod += Math.sin(t * breathRate * 0.5) * 0.03;
-         ambientShake += Math.cos(t * breathRate * 0.6) * 0.02;
-         ambientRoll += Math.sin(t * breathRate * 0.4 + 1.5) * 0.025;
+         ambientArmL += Math.sin(p * 0.8) * 0.04;
+         ambientArmR += Math.sin(p * 0.9 + 1.0) * 0.04;
+         ambientLegL += Math.sin(p * 0.7 + 2.0) * 0.02;
+         ambientLegR += Math.sin(p * 1.1 + 3.0) * 0.02;
+         ambientNod += Math.sin(p * 0.5) * 0.03;
+         ambientShake += Math.cos(p * 0.6) * 0.02;
+         ambientRoll += Math.sin(p * 0.4 + 1.5) * 0.025;
 
          // Occasional stretch mechanics
          const stretchCycle = Math.sin(t * 0.3) * Math.sin(t * 0.5) * Math.sin(t * 1.3);
@@ -201,18 +419,18 @@ export default function OrganicMesh() {
     }
     
     if (armLRef.current) {
-        armLRef.current.rotation.x = THREE.MathUtils.lerp(armLRef.current.rotation.x, 0.2 + ambientArmL, delta * baseSpeed);
-        armLRef.current.rotation.z = THREE.MathUtils.lerp(armLRef.current.rotation.z, (-Math.PI / 3.5) + armRotations.left + calibration.armL + ambientArmL, delta * baseSpeed);
+        armLRef.current.rotation.x = THREE.MathUtils.lerp(armLRef.current.rotation.x, 0.2 + ambientArmL, alphaBase);
+        armLRef.current.rotation.z = THREE.MathUtils.lerp(armLRef.current.rotation.z, (-Math.PI / 3.5) + armRotations.left + calibration.armL + ambientArmL, alphaBase);
     }
     if (armRRef.current) {
-        armRRef.current.rotation.x = THREE.MathUtils.lerp(armRRef.current.rotation.x, 0.2 + ambientArmR, delta * baseSpeed);
-        armRRef.current.rotation.z = THREE.MathUtils.lerp(armRRef.current.rotation.z, (Math.PI / 3.5) + armRotations.right + calibration.armR - ambientArmR, delta * baseSpeed);
+        armRRef.current.rotation.x = THREE.MathUtils.lerp(armRRef.current.rotation.x, 0.2 + ambientArmR, alphaBase);
+        armRRef.current.rotation.z = THREE.MathUtils.lerp(armRRef.current.rotation.z, (Math.PI / 3.5) + armRotations.right + calibration.armR - ambientArmR, alphaBase);
     }
     if (legLRef.current) {
-        legLRef.current.rotation.x = THREE.MathUtils.lerp(legLRef.current.rotation.x, 0.2 + legRotations.left + calibration.legL + ambientLegL, delta * baseSpeed);
+        legLRef.current.rotation.x = THREE.MathUtils.lerp(legLRef.current.rotation.x, 0.2 + legRotations.left + calibration.legL + ambientLegL, alphaBase);
     }
     if (legRRef.current) {
-        legRRef.current.rotation.x = THREE.MathUtils.lerp(legRRef.current.rotation.x, 0.2 + legRotations.right + calibration.legR + ambientLegR, delta * baseSpeed);
+        legRRef.current.rotation.x = THREE.MathUtils.lerp(legRRef.current.rotation.x, 0.2 + legRotations.right + calibration.legR + ambientLegR, alphaBase);
     }
     
     // Calculate synthetic blendshapes from interaction
@@ -258,6 +476,25 @@ export default function OrganicMesh() {
        synthOpen += 0.2; // teeth bared
        headNod -= 0.15; // head lowered, aggressive posture
        synthBlink = 0; // wide staring
+    }
+
+    const isDown = storeState.isPointerDown;
+    const part = storeState.activeInteractivePart;
+    if (isDown) {
+      if (part === 'cheek') {
+         synthSmile -= 0.6; // Ouch squeeze smile
+         synthBlink += 0.8; // squeeze eyes shut
+         headNod += Math.sin(state.clock.elapsedTime * 8) * 0.1; // head shake
+         interactionShake += Math.sin(state.clock.elapsedTime * 6.0) * 0.15; // responsive side tilt
+      } else if (part === 'stomach') {
+         synthSmile += 1.2; // giggly happy face
+         synthOpen += 0.7; // open mouth to laugh!
+         synthBrowUp += 0.6; // happy high eyebrows
+         // We will add scale jitter and limbs jitter
+         ambientArmL += Math.sin(state.clock.elapsedTime * 40.0) * 0.12;
+         ambientArmR += Math.cos(state.clock.elapsedTime * 40.0) * 0.12;
+         ambientNod += Math.sin(state.clock.elapsedTime * 35.0) * 0.08;
+      }
     }
 
     if (activity > 0) {
@@ -314,15 +551,28 @@ export default function OrganicMesh() {
     if (groupRef.current) {
        // When far away, blend out face tracking influence and inject ambient motions
        const blendFactor = isFar ? 0.3 : 1.0;
-       const targetRotX = (isFaceActive ? storeState.headRotation.x * blendFactor : 0) + headNod + ambientNod + calibration.x;
-       const targetRotY = (isFaceActive ? storeState.headRotation.y * blendFactor : 0) + headShake + ambientShake + calibration.y;
-       const targetRotZ = (isFaceActive ? storeState.headRotation.z * blendFactor : 0) + (headShake * 0.5) + (ambientShake * 0.5) + ambientRoll + calibration.z;
 
-       groupRef.current.rotation.x = THREE.MathUtils.lerp(groupRef.current.rotation.x, targetRotX, delta * baseSpeed);
-       groupRef.current.rotation.y = THREE.MathUtils.lerp(groupRef.current.rotation.y, targetRotY, delta * baseSpeed);
-       groupRef.current.rotation.z = THREE.MathUtils.lerp(groupRef.current.rotation.z, targetRotZ, delta * baseSpeed);
+       // Speculative Phase 6 - Joint Attention: Pointer Tracking Gaze
+       const mouseX = state.pointer.x * 0.5; // Up to 30 deg horizontal
+       const mouseY = state.pointer.y * 0.3; // Up to 17 deg vertical
+       const isMouseActive = Math.abs(state.pointer.x) > 0.01 || Math.abs(state.pointer.y) > 0.01;
+
+       // If face tracking is active (webcam or simulated slider), use headRotation;
+       // otherwise, if the mouse is hovering / active over screen, point head to the cursor!
+       const lookRotX = isFaceActive ? storeState.headRotation.x * blendFactor : (isMouseActive ? mouseY : 0);
+       const lookRotY = isFaceActive ? storeState.headRotation.y * blendFactor : (isMouseActive ? -mouseX : 0);
+       const lookRotZ = isFaceActive ? storeState.headRotation.z * blendFactor : 0;
+
+       const targetRotX = lookRotX + headNod + ambientNod + calibration.x;
+       const targetRotY = lookRotY + headShake + ambientShake + calibration.y;
+       const targetRotZ = lookRotZ + (headShake * 0.5) + (ambientShake * 0.5) + ambientRoll + calibration.z;
+
+       groupRef.current.rotation.x = THREE.MathUtils.lerp(groupRef.current.rotation.x, targetRotX, alphaBase);
+       groupRef.current.rotation.y = THREE.MathUtils.lerp(groupRef.current.rotation.y, targetRotY, alphaBase);
+       groupRef.current.rotation.z = THREE.MathUtils.lerp(groupRef.current.rotation.z, targetRotZ, alphaBase);
        
        // Expose display rotation and servo rotation to the store for Arduino to read
+       // In Phase 6, we correctly bind physical Pan/Tilt servo angles to actual digital head positions!
        useStore.setState({
          displayRotation: {
            x: groupRef.current.rotation.x,
@@ -330,10 +580,8 @@ export default function OrganicMesh() {
            z: groupRef.current.rotation.z
          },
          servoRotation: {
-           // Tilt servo (pin 10) mimics left arm movement
-           x: THREE.MathUtils.lerp(storeState.servoRotation.x, armRotations.left, delta * 5),
-           // Pan servo (pin 9) mimics right arm movement
-           y: THREE.MathUtils.lerp(storeState.servoRotation.y, armRotations.right, delta * 5),
+           x: groupRef.current.rotation.x, // Vertical tilt mapping
+           y: groupRef.current.rotation.y, // Horizontal pan mapping
            z: 0
          }
        });
@@ -356,34 +604,34 @@ export default function OrganicMesh() {
 
         if (isIdle) {
             // Nuanced, relaxed breathing when idle
-            const relaxedBreathPhase = state.clock.elapsedTime * (mood === 'sleepy' ? 1.0 : (mood === 'hyper' ? 3.0 : 1.5));
-            targetScaleY = 1.0 + Math.sin(relaxedBreathPhase) * 0.03 + Math.sin(relaxedBreathPhase * 0.5) * 0.01;
-            targetScaleZ = 1.0 + Math.sin(relaxedBreathPhase + 1.2) * 0.015;
-            targetScaleX = 1.0 + Math.sin(relaxedBreathPhase + 2.5) * 0.01;
+            const tempPhase = breathPhaseRef.current;
+            targetScaleY = 1.0 + Math.sin(tempPhase) * 0.03 + Math.sin(tempPhase * 0.5) * 0.01;
+            targetScaleZ = 1.0 + Math.sin(tempPhase + 1.2) * 0.015;
+            targetScaleX = 1.0 + Math.sin(tempPhase + 2.5) * 0.01;
         } else {
             // Standard/Active breathing
-            const breathPhase = state.clock.elapsedTime * (mood === 'sleepy' ? 1.5 : (mood === 'hyper' ? 6.0 : 3.0));
-            targetScaleY = 1.0 + Math.sin(breathPhase) * (mood === 'sleepy' ? 0.03 : 0.015);
-            targetScaleZ = 1.0 + Math.sin(breathPhase + 1.0) * 0.015;
-            targetScaleX = 1.0 + Math.sin(breathPhase + 2.0) * 0.01;
+            const tempPhase = breathPhaseRef.current;
+            targetScaleY = 1.0 + Math.sin(tempPhase) * (mood === 'sleepy' ? 0.03 : 0.015);
+            targetScaleZ = 1.0 + Math.sin(tempPhase + 1.0) * 0.015;
+            targetScaleX = 1.0 + Math.sin(tempPhase + 2.0) * 0.01;
         }
 
-        groupRef.current.scale.y = THREE.MathUtils.lerp(groupRef.current.scale.y, targetScaleY, delta * 5);
-        groupRef.current.scale.z = THREE.MathUtils.lerp(groupRef.current.scale.z, targetScaleZ, delta * 5);
-        groupRef.current.scale.x = THREE.MathUtils.lerp(groupRef.current.scale.x, targetScaleX, delta * 5);
+        groupRef.current.scale.y = THREE.MathUtils.lerp(groupRef.current.scale.y, targetScaleY, alphaSlow);
+        groupRef.current.scale.z = THREE.MathUtils.lerp(groupRef.current.scale.z, targetScaleZ, alphaSlow);
+        groupRef.current.scale.x = THREE.MathUtils.lerp(groupRef.current.scale.x, targetScaleX, alphaSlow);
 
        // Blink animation
        if (leftEyeScaleRef.current) {
          const targetScaleY = targetEyeScaleBase - Math.min(blinkL * 1.5, 0.95);
-         leftEyeScaleRef.current.scale.y = THREE.MathUtils.lerp(leftEyeScaleRef.current.scale.y, targetScaleY, delta * 15);
-         leftEyeScaleRef.current.scale.x = THREE.MathUtils.lerp(leftEyeScaleRef.current.scale.x, targetEyeScaleBase, delta * 15);
-         leftEyeScaleRef.current.scale.z = THREE.MathUtils.lerp(leftEyeScaleRef.current.scale.z, targetEyeScaleBase, delta * 15);
+         leftEyeScaleRef.current.scale.y = THREE.MathUtils.lerp(leftEyeScaleRef.current.scale.y, targetScaleY, alphaFast);
+         leftEyeScaleRef.current.scale.x = THREE.MathUtils.lerp(leftEyeScaleRef.current.scale.x, targetEyeScaleBase, alphaFast);
+         leftEyeScaleRef.current.scale.z = THREE.MathUtils.lerp(leftEyeScaleRef.current.scale.z, targetEyeScaleBase, alphaFast);
        }
        if (rightEyeScaleRef.current) {
          const targetScaleY = targetEyeScaleBase - Math.min(blinkR * 1.5, 0.95);
-         rightEyeScaleRef.current.scale.y = THREE.MathUtils.lerp(rightEyeScaleRef.current.scale.y, targetScaleY, delta * 15);
-         rightEyeScaleRef.current.scale.x = THREE.MathUtils.lerp(rightEyeScaleRef.current.scale.x, targetEyeScaleBase, delta * 15);
-         rightEyeScaleRef.current.scale.z = THREE.MathUtils.lerp(rightEyeScaleRef.current.scale.z, targetEyeScaleBase, delta * 15);
+         rightEyeScaleRef.current.scale.y = THREE.MathUtils.lerp(rightEyeScaleRef.current.scale.y, targetScaleY, alphaFast);
+         rightEyeScaleRef.current.scale.x = THREE.MathUtils.lerp(rightEyeScaleRef.current.scale.x, targetEyeScaleBase, alphaFast);
+         rightEyeScaleRef.current.scale.z = THREE.MathUtils.lerp(rightEyeScaleRef.current.scale.z, targetEyeScaleBase, alphaFast);
        }
 
        // Look-At IK for eyes
@@ -392,14 +640,29 @@ export default function OrganicMesh() {
          // Follow User Face (Derived from headRotation)
          eyeTarget.set(storeState.headRotation.y * -15, storeState.headRotation.x * 15, 10);
        } else {
-         // Procedural ambient looking based on mood & time
+         // Speculative Phase 6 - Eyes follow screen pointer
+         const mouseX = state.pointer.x * 15;
+         const mouseY = state.pointer.y * 10;
+         
          const lookTime = state.clock.elapsedTime * 0.5;
-         let lookX = Math.sin(lookTime * 2.1) * 3;
-         let lookY = Math.cos(lookTime * 1.5) * 2;
-         if (mood === 'sleepy') lookY -= 3;
-         if (mood === 'angry') {
-             lookX = Math.sin(lookTime * 10) * 0.5;
+         let ambientLookX = Math.sin(lookTime * 2.1) * 3;
+         let ambientLookY = Math.cos(lookTime * 1.5) * 2;
+         
+         if (mood === 'sleepy') {
+             ambientLookY -= 3.0;
+         } else if (mood === 'hyper') {
+             ambientLookX += Math.sin(state.clock.elapsedTime * 24.5) * 1.2;
+             ambientLookY += Math.cos(state.clock.elapsedTime * 28.2) * 1.2;
+         } else if (mood === 'angry') {
+             ambientLookX += Math.sin(state.clock.elapsedTime * 18.0) * 0.7;
+             ambientLookY += Math.cos(state.clock.elapsedTime * 21.4) * 0.5;
          }
+         
+         // Smooth blend pointer focus vs ambient wander
+         const isMouseActive = Math.abs(state.pointer.x) > 0.01 || Math.abs(state.pointer.y) > 0.01;
+         const lookX = isMouseActive ? THREE.MathUtils.lerp(ambientLookX, mouseX, 0.85) : ambientLookX;
+         const lookY = isMouseActive ? THREE.MathUtils.lerp(ambientLookY, mouseY, 0.85) : ambientLookY;
+         
          eyeTarget.set(lookX, lookY, 10);
        }
        
@@ -424,9 +687,9 @@ export default function OrganicMesh() {
        }
 
        // Smile & Jaw Open animation by manipulating vertices
-       const smoothedSmileL = THREE.MathUtils.lerp(prevSmileL.current || 0, smileL, delta * 15);
-       const smoothedSmileR = THREE.MathUtils.lerp(prevSmileR.current || 0, smileR, delta * 15);
-       const smoothedMouthOpen = THREE.MathUtils.lerp(prevMouthOpen.current || 0, mouthOpenVal, delta * 15);
+       const smoothedSmileL = THREE.MathUtils.lerp(prevSmileL.current || 0, smileL, alphaFast);
+       const smoothedSmileR = THREE.MathUtils.lerp(prevSmileR.current || 0, smileR, alphaFast);
+       const smoothedMouthOpen = THREE.MathUtils.lerp(prevMouthOpen.current || 0, mouthOpenVal, alphaFast);
        
        prevSmileL.current = smoothedSmileL;
        prevSmileR.current = smoothedSmileR;
@@ -577,13 +840,26 @@ export default function OrganicMesh() {
   }, []);
 
   const storeAmbientColor = useStore(state => state.ambientColor);
+  const qualityMode = useStore(state => state.qualityMode);
 
-  const { rootColor: baseRootColor, tipColor: baseTipColor, thickness, length } = useControls('Appearance', {
+  const { furRenderingMode, shellCount, furlDensity, rootColor: baseRootColor, tipColor: baseTipColor, thickness, length } = useControls('Appearance', {
+    furRenderingMode: {
+      options: ['Volumetric Shells (Plush)', 'Instanced Strands (Fuzzy)'],
+      value: 'Volumetric Shells (Plush)'
+    },
+    shellCount: { value: 18, min: 6, max: 32, step: 1 },
+    furlDensity: { value: 200.0, min: 40.0, max: 300.0, step: 10 },
     rootColor: '#5c3523',
     tipColor: '#d6a378',
     thickness: { value: 0.004, min: 0.0005, max: 0.02 },
     length: { value: 0.06, min: 0.02, max: 0.4 }
   });
+
+  const activeShellCount = useMemo(() => {
+    if (qualityMode === 'powersave') return 6;
+    if (qualityMode === 'standard') return 12;
+    return shellCount;
+  }, [qualityMode, shellCount]);
 
   const [rootColor, setRootColor] = useState(baseRootColor);
   const [tipColor, setTipColor] = useState(baseTipColor);
@@ -614,6 +890,10 @@ export default function OrganicMesh() {
           tipColor={tipColor} 
           thickness={thickness} 
           length={length} 
+          partName="body"
+          furMode={furRenderingMode}
+          shellCount={activeShellCount}
+          furlDensity={furlDensity}
       />
 
       <group ref={armLRef} position={[-1.2, -0.05, 0.4]} rotation={[0.2, 0, -Math.PI / 3.5]}>
@@ -623,6 +903,10 @@ export default function OrganicMesh() {
             tipColor={tipColor} 
             thickness={thickness} 
             length={length} 
+            partName="left_arm"
+            furMode={furRenderingMode}
+            shellCount={activeShellCount}
+            furlDensity={furlDensity}
         />
       </group>
 
@@ -633,6 +917,10 @@ export default function OrganicMesh() {
             tipColor={tipColor} 
             thickness={thickness} 
             length={length} 
+            partName="right_arm"
+            furMode={furRenderingMode}
+            shellCount={activeShellCount}
+            furlDensity={furlDensity}
         />
       </group>
 
@@ -643,6 +931,10 @@ export default function OrganicMesh() {
             tipColor={tipColor} 
             thickness={thickness} 
             length={length} 
+            partName="left_leg"
+            furMode={furRenderingMode}
+            shellCount={activeShellCount}
+            furlDensity={furlDensity}
         />
       </group>
 
@@ -653,6 +945,10 @@ export default function OrganicMesh() {
             tipColor={tipColor} 
             thickness={thickness} 
             length={length} 
+            partName="right_leg"
+            furMode={furRenderingMode}
+            shellCount={activeShellCount}
+            furlDensity={furlDensity}
         />
       </group>
 
@@ -759,6 +1055,80 @@ export default function OrganicMesh() {
           </group>
         </group>
       </group>
+
+      {/* Interactive Raycasting Hotspots with Pulsing Visual Guides */}
+      {((window as any)._showInteractiveHotspots !== false) && (
+        <group>
+          {/* Left Cheek Pinch Hotspot */}
+          <mesh 
+            position={[-0.60, 0.45, 1.25]}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              useStore.getState().setIsPointerDown(true);
+              useStore.getState().setActiveInteractivePart('cheek');
+              useStore.getState().setInteractionMode('Pinch');
+            }}
+            onPointerUp={(e) => {
+              e.stopPropagation();
+              useStore.getState().setIsPointerDown(false);
+            }}
+          >
+            <sphereGeometry args={[0.22, 16, 16]} />
+            <meshBasicMaterial 
+              color="#818cf8" 
+              wireframe 
+              transparent 
+              opacity={0.35 + Math.sin(Date.now() / 220) * 0.15} 
+            />
+          </mesh>
+
+          {/* Right Cheek Pinch Hotspot */}
+          <mesh 
+            position={[0.60, 0.45, 1.25]}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              useStore.getState().setIsPointerDown(true);
+              useStore.getState().setActiveInteractivePart('cheek');
+              useStore.getState().setInteractionMode('Pinch');
+            }}
+            onPointerUp={(e) => {
+              e.stopPropagation();
+              useStore.getState().setIsPointerDown(false);
+            }}
+          >
+            <sphereGeometry args={[0.22, 16, 16]} />
+            <meshBasicMaterial 
+              color="#818cf8" 
+              wireframe 
+              transparent 
+              opacity={0.35 + Math.sin(Date.now() / 220) * 0.15} 
+            />
+          </mesh>
+
+          {/* Stomach Tickle Hotspot */}
+          <mesh 
+            position={[0, -0.75, 1.22]}
+            onPointerDown={(e) => {
+              e.stopPropagation();
+              useStore.getState().setIsPointerDown(true);
+              useStore.getState().setActiveInteractivePart('stomach');
+              useStore.getState().setInteractionMode('Tickle');
+            }}
+            onPointerUp={(e) => {
+              e.stopPropagation();
+              useStore.getState().setIsPointerDown(false);
+            }}
+          >
+            <sphereGeometry args={[0.32, 16, 16]} />
+            <meshBasicMaterial 
+              color="#f43f5e" 
+              wireframe 
+              transparent 
+              opacity={0.35 + Math.sin(Date.now() / 220) * 0.15} 
+            />
+          </mesh>
+        </group>
+      )}
     </group>
   );
 }

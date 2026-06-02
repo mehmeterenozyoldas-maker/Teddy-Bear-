@@ -1,23 +1,30 @@
 import React, { useState, useEffect } from 'react';
 import { useStore } from '../store';
+import { Terminal, Zap, Unplug } from 'lucide-react';
 
 export default function ArduinoConnection() {
   const [showCode, setShowCode] = useState(false);
   const [codeVersion, setCodeVersion] = useState<'micro' | 'distance_only' | 'light_only' | 'tokens_only' | 'vibro' | 'advanced'>('distance_only');
   const connectSerial = useStore(state => state.connectSerial);
   const serialPort = useStore(state => state.serialPort);
+  const serialStatus = useStore(state => state.serialStatus);
   const serialWriter = useStore(state => state.serialWriter);
   const mood = useStore(state => state.mood);
   const interactionMode = useStore(state => state.interactionMode);
   const ledColor = useStore(state => state.ledColor);
   const isHardwareTouched = useStore(state => state.isHardwareTouched);
 
-  // 1. Send Servo Commands Periodically
+  // 1. Send Servo Commands Periodically (Smoothed with S-Curve dynamics to prevent mechanical gear damage)
   useEffect(() => {
     if (!serialWriter) return;
 
     let lastPan = -1;
     let lastTilt = -1;
+
+    let currentPan = 90;
+    let currentTilt = 90;
+    let panVelocity = 0;
+    let tiltVelocity = 0;
 
     const interval = setInterval(async () => {
       const state = useStore.getState();
@@ -28,17 +35,31 @@ export default function ArduinoConnection() {
         y: Math.floor(90 + (rot.y * 180 / Math.PI))
       };
 
-      // Constrain just to be safe
-      const safePan = Math.max(0, Math.min(180, targetRot.y));
-      const safeTilt = Math.max(0, Math.min(180, targetRot.x));
+      const targetPan = Math.max(0, Math.min(180, targetRot.y));
+      const targetTilt = Math.max(0, Math.min(180, targetRot.x));
+
+      // S-Curve critical spring-mass parameters: k=stiffness, d=damping
+      const k = 0.22;
+      const d = 0.68;
+
+      const panForce = (targetPan - currentPan) * k;
+      panVelocity = (panVelocity + panForce) * d;
+      currentPan += panVelocity;
+
+      const tiltForce = (targetTilt - currentTilt) * k;
+      tiltVelocity = (tiltVelocity + tiltForce) * d;
+      currentTilt += tiltVelocity;
+
+      const filteredPan = Math.round(currentPan);
+      const filteredTilt = Math.round(currentTilt);
 
       // Only send if the values have changed to reduce constant servo jitter
-      if (Math.abs(safePan - lastPan) >= 1 || Math.abs(safeTilt - lastTilt) >= 1) {
-        lastPan = safePan;
-        lastTilt = safeTilt;
+      if (Math.abs(filteredPan - lastPan) >= 1 || Math.abs(filteredTilt - lastTilt) >= 1) {
+        lastPan = filteredPan;
+        lastTilt = filteredTilt;
         
         try {
-          await serialWriter.write(`X${safePan}Y${safeTilt}\n`);
+          await serialWriter.write(`X${filteredPan}Y${filteredTilt}\n`);
         } catch (err) {
           console.error("Error writing to serial:", err);
         }
@@ -48,7 +69,7 @@ export default function ArduinoConnection() {
     return () => clearInterval(interval);
   }, [serialWriter]);
 
-  // 2. Trigger Vibration for 'Pinch' or 'Angry' (Spicy) mood
+  // 2. Location-Aware Multi-Vibration Haptic suite (Phase 2)
   useEffect(() => {
     if (!serialWriter) return;
 
@@ -60,23 +81,69 @@ export default function ArduinoConnection() {
       }
     };
 
-    if (interactionMode === 'Pinch') {
-      const playPattern = async () => {
+    const playContextHaptic = async () => {
+      const state = useStore.getState();
+      const mode = state.interactionMode;
+      const part = state.activeInteractivePart;
+
+      // Skip haptics if not actively touched/poked
+      if (!state.isPointerDown && !state.isHardwareTouched) return;
+
+      console.log(`[Haptic] Playing pattern for: ${mode} on part: ${part}`);
+
+      if (mode === 'Pinch') {
+        if (part === 'left_arm' || part === 'right_arm') {
+          // Sharp double pinch (Ouch)
+          await triggerVibe(60);
+          await new Promise(r => setTimeout(r, 100));
+          await triggerVibe(60);
+        } else if (part?.includes('leg')) {
+          // Intense leg warning
+          await triggerVibe(220);
+        } else {
+          // Normal defensive triple pinching buzz
+          await triggerVibe(50);
+          await new Promise(r => setTimeout(r, 120));
+          await triggerVibe(100);
+          await new Promise(r => setTimeout(r, 120));
+          await triggerVibe(50);
+        }
+      } else if (mode === 'Poke') {
+        // High fidelity double tap
+        await triggerVibe(35);
+        await new Promise(r => setTimeout(r, 80));
+        await triggerVibe(35);
+      } else if (mode === 'Tickle') {
+        // Fast play triplet
+        await triggerVibe(40);
+        await new Promise(r => setTimeout(r, 100));
+        await triggerVibe(55);
+        await new Promise(r => setTimeout(r, 100));
+        await triggerVibe(40);
+      } else if (mode === 'Stroke' || mode === 'Pet') {
+        // Heartbeat hums
+        if (part === 'body') {
+          await triggerVibe(140);
+        } else {
+          await triggerVibe(80);
+        }
+      } else if (mode === 'Grab') {
+        await triggerVibe(280);
+      } else if (mode === 'Tap') {
         await triggerVibe(80);
-        await new Promise(r => setTimeout(r, 150));
-        await triggerVibe(120);
-        await new Promise(r => setTimeout(r, 150));
-        await triggerVibe(80);
-      };
-      playPattern();
+      }
+    };
+
+    const isDown = useStore.getState().isPointerDown;
+    if (isDown) {
+      playContextHaptic();
     }
-  }, [interactionMode, serialWriter]);
+  }, [interactionMode, useStore.getState().activeInteractivePart, useStore.getState().isPointerDown, serialWriter]);
 
   useEffect(() => {
     if (!serialWriter) return;
 
     if (mood === 'angry') {
-      // Long, intense vibration for "Spicy" / angry mood token
       try {
         serialWriter.write(`V500\n`);
       } catch (err) {}
@@ -263,24 +330,49 @@ export default function ArduinoConnection() {
     );
   };
 
+  const getButtonState = () => {
+    switch (serialStatus) {
+      case 'connecting':
+        return { text: 'Connecting...', className: 'bg-yellow-600 hover:bg-yellow-700 text-white animate-pulse' };
+      case 'handshaking':
+        return { text: 'Synchronizing...', className: 'bg-amber-500 hover:bg-amber-600 text-white animate-pulse' };
+      case 'connected':
+        return { text: 'Arduino Connected', className: 'bg-green-500 hover:bg-green-600 text-white' };
+      case 'error':
+        return { text: 'Connection Fault! Retry', className: 'bg-red-600 hover:bg-red-700 text-white animate-pulse' };
+      default:
+        return { text: 'Connect Arduino', className: 'bg-[#a37c73] hover:bg-[#8a655d] text-white' };
+    }
+  };
+
+  const btnMeta = getButtonState();
+
   return (
     <div className="fixed bottom-4 left-4 z-[1000] flex flex-col items-start gap-2 max-h-[90vh] overflow-y-auto pointer-events-auto custom-scrollbar pr-2">
       <button 
         onClick={connectSerial}
-        className={`px-4 py-2 rounded-lg font-bold shadow-lg transition-colors ${
-          serialPort 
-            ? 'bg-green-500 hover:bg-green-600 text-white' 
-            : 'bg-[#a37c73] hover:bg-[#8a655d] text-white'
+        className={`px-4 py-2 font-medium text-xs rounded-full shadow-lg border backdrop-blur-md transition-all duration-300 ${
+          serialStatus === 'connected' 
+            ? 'bg-emerald-500/20 text-emerald-400 border-emerald-500/30 hover:bg-emerald-500/30' 
+            : serialStatus === 'handshaking' || serialStatus === 'connecting'
+            ? 'bg-amber-500/20 text-amber-400 border-amber-500/30 hover:bg-amber-500/30 animate-pulse'
+            : serialStatus === 'error'
+            ? 'bg-red-500/20 text-red-400 border-red-500/30 hover:bg-red-500/30 animate-pulse'
+            : 'bg-zinc-900/80 text-white border-zinc-700/80 hover:bg-zinc-800'
         }`}
       >
-        {serialPort ? 'Arduino Connected' : 'Connect Arduino'}
+        <span className="flex items-center gap-2">
+          {serialStatus === 'connected' ? <Zap size={14} /> : <Unplug size={14} />}
+          {btnMeta.text}
+        </span>
       </button>
 
       <button 
         onClick={() => setShowCode(!showCode)}
-        className="px-3 py-1.5 rounded-lg bg-black/50 hover:bg-black/70 text-white/80 text-sm backdrop-blur-sm transition-colors"
+        className="px-4 py-2 rounded-full bg-zinc-900/80 hover:bg-zinc-800 text-white text-xs font-medium border border-zinc-700/80 backdrop-blur-sm shadow-lg transition-all duration-300 flex items-center gap-2"
       >
-        {showCode ? 'Hide Setup & Code' : 'Show Hardware Setup & Arduino Code'}
+        <Terminal size={14} className="text-zinc-400" />
+        {showCode ? 'Hide Docs' : 'Arduino Setup Docs'}
       </button>
 
       {showCode && (

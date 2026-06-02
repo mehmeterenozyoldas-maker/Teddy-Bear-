@@ -89,5 +89,59 @@ export default function AudioManager() {
      }
   }, [mood]);
 
+  const activeMelody = useStore((s) => s.activeMelody);
+  const setActiveMelody = useStore((s) => s.setActiveMelody);
+  const sendSerialData = useStore((s) => s.sendSerialData);
+
+  useEffect(() => {
+    if (!activeMelody) return;
+    
+    const playSeq = async () => {
+      const type = activeMelody;
+      if (type === 'sparkle') {
+        playSynthesizer('sine', [800, 800], 0.08, 0.2);
+        await sendSerialData('V60\n');
+        await new Promise(r => setTimeout(r, 100));
+        
+        playSynthesizer('sine', [1000, 1000], 0.08, 0.2);
+        await sendSerialData('V60\n');
+        await new Promise(r => setTimeout(r, 100));
+        
+        playSynthesizer('sine', [1300, 1300], 0.15, 0.25);
+        await sendSerialData('V120\n');
+      } else if (type === 'heartbeat') {
+        playSynthesizer('triangle', [100, 100], 0.15, 0.4);
+        await sendSerialData('V120\n');
+        await new Promise(r => setTimeout(r, 220));
+        
+        playSynthesizer('triangle', [90, 90], 0.15, 0.4);
+        await sendSerialData('V120\n');
+      } else if (type === 'jolt') {
+        playSynthesizer('sawtooth', [1500, 1500], 0.05, 0.3);
+        await sendSerialData('V40\n');
+        await new Promise(r => setTimeout(r, 70));
+        
+        playSynthesizer('sawtooth', [1500, 1500], 0.05, 0.3);
+        await sendSerialData('V40\n');
+        await new Promise(r => setTimeout(r, 70));
+        
+        playSynthesizer('sawtooth', [1500, 1500], 0.05, 0.3);
+        await sendSerialData('V40\n');
+        await new Promise(r => setTimeout(r, 70));
+        
+        playSynthesizer('sawtooth', [600, 300], 0.25, 0.35);
+        await sendSerialData('V250\n');
+      } else if (type === 'breeze') {
+        playSynthesizer('sine', [350, 700], 0.6, 0.25);
+        await sendSerialData('V500\n');
+      }
+      
+      // Auto-reset active melody state in store
+      setActiveMelody(null);
+    };
+    
+    playSeq();
+  }, [activeMelody, sendSerialData, setActiveMelody]);
+
   return null;
 }

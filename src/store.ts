@@ -12,6 +12,10 @@ interface AppState {
   setLegRotations: (rot: { left: number; right: number }) => void;
   faceTrackingActive: boolean;
   setFaceTrackingActive: (active: boolean) => void;
+  faceSimulated: boolean;
+  setFaceSimulated: (simulated: boolean) => void;
+  activeMelody: string | null;
+  setActiveMelody: (melody: string | null) => void;
   blendshapes: {
     eyeBlinkLeft: number;
     eyeBlinkRight: number;
@@ -69,13 +73,23 @@ interface AppState {
   // Tracking State
   armTrackingActive: boolean;
   setArmTrackingActive: (active: boolean) => void;
+  activeInteractivePart: string | null;
+  setActiveInteractivePart: (part: string | null) => void;
   
   // Serial Connection
+  serialStatus: 'disconnected' | 'connecting' | 'handshaking' | 'connected' | 'error';
   serialPort: SerialPort | null;
   serialWriter: WritableStreamDefaultWriter | null;
   lastSerialSend?: number;
   connectSerial: () => Promise<void>;
   sendSerialData: (data: string) => Promise<void>;
+
+  // Emulation Sandbox & Quality Profile (Phase 5)
+  serialLogs: Array<{ id: string; timestamp: string; dir: 'TX' | 'RX'; text: string }>;
+  addSerialLog: (dir: 'TX' | 'RX', text: string) => void;
+  clearSerialLogs: () => void;
+  qualityMode: 'cinematic' | 'standard' | 'powersave';
+  setQualityMode: (mode: 'cinematic' | 'standard' | 'powersave') => void;
 }
 
 export const useStore = create<AppState>((set, get) => ({
@@ -92,6 +106,10 @@ export const useStore = create<AppState>((set, get) => ({
   setDisplayRotation: (rotation) => set({ displayRotation: rotation }),
   faceTrackingActive: false,
   setFaceTrackingActive: (active) => set({ faceTrackingActive: active }),
+  faceSimulated: false,
+  setFaceSimulated: (simulated) => set({ faceSimulated: simulated }),
+  activeMelody: null,
+  setActiveMelody: (melody) => set({ activeMelody: melody }),
   blendshapes: { 
     eyeBlinkLeft: 0, 
     eyeBlinkRight: 0, 
@@ -138,9 +156,24 @@ export const useStore = create<AppState>((set, get) => ({
 
   armTrackingActive: false,
   setArmTrackingActive: (active) => set({ armTrackingActive: active }),
+  activeInteractivePart: null,
+  setActiveInteractivePart: (part) => set({ activeInteractivePart: part }),
 
+  serialStatus: 'disconnected',
   serialPort: null,
   serialWriter: null,
+  serialLogs: [],
+  addSerialLog: (dir, text) => {
+    const timestamp = new Date().toLocaleTimeString();
+    const id = Math.random().toString(36).substring(2, 9);
+    set((state) => ({
+      serialLogs: [...state.serialLogs, { id, timestamp, dir, text }].slice(-60)
+    }));
+  },
+  clearSerialLogs: () => set({ serialLogs: [] }),
+  qualityMode: 'cinematic',
+  setQualityMode: (mode) => set({ qualityMode: mode }),
+
   connectSerial: async () => {
     try {
       if (!('serial' in navigator)) {
@@ -148,12 +181,16 @@ export const useStore = create<AppState>((set, get) => ({
         return;
       }
       
+      set({ serialStatus: 'connecting' });
+      get().addSerialLog('TX', 'Connecting to Web Serial port...');
       const port = await navigator.serial.requestPort();
       
       try {
         await port.open({ baudRate: 9600 });
       } catch (openError: any) {
         console.error('Failed to open serial port:', openError);
+        set({ serialStatus: 'error' });
+        get().addSerialLog('RX', `Error: Open failed - ${openError.message}`);
         alert(`Failed to open serial port. Please make sure the port is not in use by another application (like the Arduino IDE Serial Monitor).\n\nDetails: ${openError.message}`);
         return;
       }
@@ -163,8 +200,27 @@ export const useStore = create<AppState>((set, get) => ({
       const writableStreamClosed = textEncoder.readable.pipeTo(port.writable);
       const writer = textEncoder.writable.getWriter();
       
-      set({ serialPort: port, serialWriter: writer });
-      console.log('Serial port connected!');
+      set({ serialPort: port, serialWriter: writer, serialStatus: 'handshaking' });
+      console.log('Serial port opened, initiating handshake...');
+      get().addSerialLog('TX', 'Serial port opened. Active handshake initiation...');
+
+      // Send Handshake SYN packet
+      try {
+        await writer.write("SYN\n");
+        get().addSerialLog('TX', 'SYN (Handshake Request)');
+      } catch (wErr) {
+        console.error("Failed to write initial SYN handshake packet:", wErr);
+      }
+
+      // 3.5s Fallback promotion in case standard/custom firmware does not support SYN/ACK handshaking
+      const fallbackTimeout = setTimeout(() => {
+        const currentStatus = get().serialStatus;
+        if (currentStatus === 'handshaking') {
+          console.warn('Handshake SYN timed out. Auto-promoting to legacy "connected" fallback.');
+          get().addSerialLog('TX', 'Warning: SYN timeout. Auto-promoting to Legacy Fallback Mode');
+          set({ serialStatus: 'connected' });
+        }
+      }, 3500);
 
       // Setup Reader
       const textDecoder = new TextDecoderStream();
@@ -185,6 +241,19 @@ export const useStore = create<AppState>((set, get) => ({
               
               for (const line of lines) {
                 const trimmed = line.trim();
+                
+                // Track handshake acknowledgement packages
+                if (trimmed === 'ACK' || trimmed === 'READY' || trimmed.startsWith('ACK:')) {
+                  console.log('Handshake verified successfully with:', trimmed);
+                  get().addSerialLog('RX', trimmed + ' -> Handshake Established!');
+                  clearTimeout(fallbackTimeout);
+                  set({ serialStatus: 'connected' });
+                  continue;
+                }
+
+                // Log any general incoming lines in sandbox console
+                get().addSerialLog('RX', trimmed);
+
                 if (trimmed.startsWith('TUI:')) {
                   const newMood = trimmed.substring(4).toLowerCase();
                   if (['neutral', 'hyper', 'sleepy', 'loving', 'angry'].includes(newMood)) {
@@ -219,17 +288,23 @@ export const useStore = create<AppState>((set, get) => ({
           }
         } catch (error) {
           console.error("Read loop error:", error);
+          set({ serialStatus: 'error' });
+          get().addSerialLog('RX', `Error: Stream closed abruptly`);
         } finally {
+          clearTimeout(fallbackTimeout);
           reader.releaseLock();
         }
       })();
 
     } catch (e) {
       console.error('Failed to connect to serial port:', e);
+      set({ serialStatus: 'error' });
+      get().addSerialLog('RX', `Error: requestPort rejected`);
     }
   },
   sendSerialData: async (data: string) => {
     const { serialWriter } = get();
+    get().addSerialLog('TX', data.trim());
     if (serialWriter) {
       try {
         await serialWriter.write(data);

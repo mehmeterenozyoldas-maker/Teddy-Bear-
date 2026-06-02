@@ -159,6 +159,8 @@ interface HairSystemProps {
   tipColor: string;
   thickness: number;
   length: number;
+  stateTextureRef?: React.MutableRefObject<THREE.Texture | null>;
+  visible?: boolean;
 }
 
 interface InteractionControls {
@@ -167,7 +169,7 @@ interface InteractionControls {
   interactionMode: string;
 }
 
-export default function HairSystem({ positionsTexture, normalsTexture, mousePositionRef, count, size, rootColor, tipColor, thickness, length }: HairSystemProps) {
+export default function HairSystem({ positionsTexture, normalsTexture, mousePositionRef, count, size, rootColor, tipColor, thickness, length, stateTextureRef, visible = true }: HairSystemProps) {
   const setInteractionMode = useStore(s => s.setInteractionMode);
   const setInteractionActivity = useStore(s => s.setInteractionActivity);
 
@@ -488,11 +490,14 @@ export default function HairSystem({ positionsTexture, normalsTexture, mousePosi
     hairMaterial.uniforms.uLength.value = length;
     
     const temp = currentTarget.current;
+    if (stateTextureRef) {
+      stateTextureRef.current = temp.texture;
+    }
     currentTarget.current = prevTarget.current;
     prevTarget.current = temp;
   });
 
-  return (
+  return visible ? (
     <instancedMesh ref={instancedRef} args={[hairGeometry, hairMaterial, count]} frustumCulled={false} />
-  );
+  ) : null;
 }
