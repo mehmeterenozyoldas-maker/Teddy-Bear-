@@ -157,6 +157,7 @@ export default function OrganicMesh() {
     let ambientLegR = 0;
     let ambientNod = 0;
     let ambientShake = 0;
+    let ambientRoll = 0;
     let ambientBlink = 0;
     
     // Determine if user is idle (face not tracked, or far away and no activity)
@@ -175,6 +176,7 @@ export default function OrganicMesh() {
          ambientLegR += Math.sin(t * breathRate * 1.1 + 3.0) * 0.02;
          ambientNod += Math.sin(t * breathRate * 0.5) * 0.03;
          ambientShake += Math.cos(t * breathRate * 0.6) * 0.02;
+         ambientRoll += Math.sin(t * breathRate * 0.4 + 1.5) * 0.025;
 
          // Occasional stretch mechanics
          const stretchCycle = Math.sin(t * 0.3) * Math.sin(t * 0.5) * Math.sin(t * 1.3);
@@ -314,7 +316,7 @@ export default function OrganicMesh() {
        const blendFactor = isFar ? 0.3 : 1.0;
        const targetRotX = (isFaceActive ? storeState.headRotation.x * blendFactor : 0) + headNod + ambientNod + calibration.x;
        const targetRotY = (isFaceActive ? storeState.headRotation.y * blendFactor : 0) + headShake + ambientShake + calibration.y;
-       const targetRotZ = (isFaceActive ? storeState.headRotation.z * blendFactor : 0) + (headShake * 0.5) + (ambientShake * 0.5) + calibration.z;
+       const targetRotZ = (isFaceActive ? storeState.headRotation.z * blendFactor : 0) + (headShake * 0.5) + (ambientShake * 0.5) + ambientRoll + calibration.z;
 
        groupRef.current.rotation.x = THREE.MathUtils.lerp(groupRef.current.rotation.x, targetRotX, delta * baseSpeed);
        groupRef.current.rotation.y = THREE.MathUtils.lerp(groupRef.current.rotation.y, targetRotY, delta * baseSpeed);

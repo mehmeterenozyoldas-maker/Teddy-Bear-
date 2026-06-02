@@ -256,6 +256,7 @@ export default function HairSystem({ positionsTexture, normalsTexture, mousePosi
         varying vec3 vWorldPosition;
         varying vec3 vBaseNormal;
         varying float vRandom;
+        varying float vInteraction;
         
         // Pseudo-random noise for length mapping and clumping
         float hash(vec2 p) { return fract(1e4 * sin(17.0 * p.x + p.y * 0.1) * (0.1 + abs(sin(p.y * 13.0 + p.x)))); }
@@ -275,7 +276,12 @@ export default function HairSystem({ positionsTexture, normalsTexture, mousePosi
           // Rotate the normal using the modelMatrix's rotation (normalMatrix)
           vBaseNormal = normalize(normalMatrix * normal);
           
-          vec2 disp = texture2D(stateTexture, texUv).rg;
+          vec4 stateInfo = texture2D(stateTexture, texUv);
+          vec2 disp = stateInfo.rg;
+          vec2 vel = stateInfo.ba;
+          
+          // Compute interaction intensity from velocity to pass to fragment shader
+          vInteraction = smoothstep(0.5, 5.0, length(vel));
           
           vec3 p = position;
           
@@ -361,6 +367,7 @@ export default function HairSystem({ positionsTexture, normalsTexture, mousePosi
         varying vec3 vWorldPosition;
         varying vec3 vBaseNormal;
         varying float vRandom;
+        varying float vInteraction;
         uniform float uTime;
         uniform vec3 uRootColor;
         uniform vec3 uTipColor;
@@ -375,11 +382,18 @@ export default function HairSystem({ positionsTexture, normalsTexture, mousePosi
           // Interpolate softly over the length of the strand (smooth quadratic blending)
           vec3 color = mix(variedRoot, variedTip, curve * curve * (3.0 - 2.0 * curve));
 
+          // Interaction visual feedback: increase brightness and add a slight tint
+          vec3 highlightColor = mix(vec3(1.0, 0.9, 0.7), vec3(0.8, 1.0, 0.9), vRandom); // yellowish or greenish tint
+          color = mix(color, color + highlightColor * curve * 1.5, vInteraction * 0.6);
+
           // Key Light (warm)
           vec3 keyLightDir = normalize(vec3(4.0, 5.0, 4.0));
           vec3 keyColor = vec3(1.0, 0.85, 0.76); 
           float diffuse = max(dot(vBaseNormal, keyLightDir), 0.0);
-          color += uTipColor * keyColor * diffuse * 0.5 * curve;
+          
+          // Increase gloss / highlight intensity based on interaction
+          float glossBoost = mix(1.0, 2.5, vInteraction);
+          color += uTipColor * keyColor * diffuse * 0.5 * curve * glossBoost;
 
           // Fill Light (cool)
           vec3 fillLightDir = normalize(vec3(-4.0, 2.0, 4.0));
@@ -399,8 +413,10 @@ export default function HairSystem({ positionsTexture, normalsTexture, mousePosi
           float rim = pow(1.0 - viewDot, 3.0);
           vec3 rimColor = vec3(1.0, 0.92, 0.8);
           
+          // Boost rim light strongly where interaction occurs
+          float rimBoost = mix(1.0, 3.0, vInteraction);
           // Vellus hair explodes with light when backlit
-          color += rimColor * backlight * rim * 2.0 * curve;
+          color += rimColor * backlight * rim * 2.0 * curve * rimBoost;
 
           gl_FragColor = vec4(color, 1.0);
         }
