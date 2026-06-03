@@ -7,7 +7,6 @@ import { Canvas } from '@react-three/fiber';
 import Scene from './components/Scene';
 import FaceTracker from './components/FaceTracker';
 import ArduinoConnection from './components/ArduinoConnection';
-import CalibrationDashboard from './components/CalibrationDashboard';
 import AudioManager from './components/AudioManager';
 import TangibleTray from './components/TangibleTray';
 import PhysicalSandbox from './components/PhysicalSandbox';
@@ -29,7 +28,6 @@ export default function App() {
       {/* Core Diagnostic & Physical System Modules */}
       <FaceTracker />
       <ArduinoConnection />
-      <CalibrationDashboard />
       <AudioManager />
       <TangibleTray />
       
